@@ -3,6 +3,7 @@ import axios from "axios";
 import * as fs from "fs";
 import path from "path";
 import { promises as fsPromises } from "fs";
+import Promise from "bluebird";
 import ora from "ora";
 import prompt from "prompt";
 
@@ -16,14 +17,15 @@ const fileName = process.env.FILENAME || "file.json";
 
 const timeoutRequest = process.env.TIMEOUT_REQUEST
   ? +process.env.TIMEOUT_REQUEST
-  : 25000;
-const requestDelay = process.env.REQUEST_DELAY
-  ? +process.env.REQUEST_DELAY
-  : 250;
+  : 40000;
 
 const cleanFolder = process.env.CLEAN_FOLDER
   ? process.env.CLEAN_FOLDER === "true"
   : false;
+
+const concurrencyLimit = process.env.CONCURRENCY_LIMIT
+  ? +process.env.CONCURRENCY_LIMIT
+  : 6;
 
 const urls: string[] = [];
 const errorUrls: string[] = [];
@@ -79,15 +81,19 @@ const ParseJsonFile = async () => {
 };
 
 const DownloadFile = (fileUrl: string, index: number) => {
-  return new Promise((resolve, reject) => {
-    const spinner = ora(`Grabbing file ${index}/${urls.length}`).start();
+  return new Promise((resolve) => {
+    console.log(`Grabbing file ${index}/${urls.length}`)
 
     const fileName = path.basename(fileUrl);
-
+  
     const localFilePath = path.resolve(__dirname, folder, fileName);
     if (fs.existsSync(localFilePath)) {
-      spinner.info(`File ${index}/${urls.length} already exist, skipped`);
-      return;
+      console.log(`File ${index}/${urls.length} already exist, skipped`);
+      return resolve(true);
+    }
+    // delete the tmp file
+    if (fs.existsSync(localFilePath + '.tmp')) {
+      fs.rmSync(localFilePath + '.tmp');
     }
     try {
       axios({
@@ -96,19 +102,20 @@ const DownloadFile = (fileUrl: string, index: number) => {
         responseType: "stream",
         timeout: timeoutRequest,
       }).then(async (response) => {
-        const w = response.data.pipe(fs.createWriteStream(localFilePath));
+        const w = response.data.pipe(fs.createWriteStream(localFilePath + '.tmp'));
         w.on("finish", () => {
-          spinner.succeed(
+          fs.renameSync(localFilePath + '.tmp', localFilePath)
+          console.log(
             `File ${index}/${urls.length} successfully downloaded`
           );
-          resolve();
+          return resolve(true);
         });
       });
     } catch (err) {
-      console.log(err)
+      console.log(err);
       errorUrls.push(fileUrl);
-      spinner.fail(`Error while downloading the file ${index}/${urls.length}`);
-      reject()
+      console.log(`Error while downloading the file ${index}/${urls.length}`);
+      return resolve(false);
     }
   })
 };
@@ -144,8 +151,7 @@ const validationByUser = () => {
   console.log(`--     Filename     : ${fileName}`);
   console.log(`--     Folder       : ${folder}`);
   console.log(`--     Clean folder : ${cleanFolder ? "yes" : "no"}`);
-  console.log(`--     Timeout      : 250000`);
-  console.log(`--     Delay        : 2500`);
+  console.log(`--     Timeout      : ${timeoutRequest}`);
   console.log("");
   prompt.get(
     [
@@ -183,22 +189,21 @@ const startGrabber = async () => {
 
   console.log(`${urls.length} images found, starting grabber ...`);
   console.log("");
-  let toDownload = urls.slice(1000).map((url: string, index: number) => {
-    setTimeout(async () => {
-      await DownloadFile(url, index + 1);
-      if (index + 1 === urls.length) {
-        console.log("");
-        const spinner = ora(
-          `Grabbing finalization, please wait ${
-            (timeoutRequest + 50000) / 1000
-          } secondes ....`
-        ).start();
-        setTimeout(() => {
-          spinner.succeed("Grabbing finished !");
-          summary();
-        }, timeoutRequest);
-      }
-    }, requestDelay * index);
+
+  const fetchUrlAsync = ({ index, data }: any) => {
+    return DownloadFile(data, index + 1);
+  }
+  const allPromise = Promise.map(
+    urls.map((data, index) => ({ data, index })),
+    fetchUrlAsync,
+    { concurrency: 4 }
+  );
+  
+  allPromise.then((allValues: any) => {
+    console.log('All jobs completed!')
+    
+    summary();
+    console.log(allValues)
   });
 };
 
